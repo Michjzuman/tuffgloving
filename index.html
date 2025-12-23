@@ -209,8 +209,6 @@
             const hud = document.getElementById("hud");
             let hudVisible = false;
             let hudHideTimer = null;
-            const fingertipTrails = new Map();
-            const MAX_TRAIL_POINTS = 48;
 
             function setHudVisible(v) {
                 hudVisible = v;
@@ -250,39 +248,7 @@
                 if (canvas.height !== h) canvas.height = h;
             }
 
-            function drawTrail(trail) {
-                if (!trail || !trail.points || trail.points.length < 2) return;
-
-                const { points, hue, blink, radius } = trail;
-                const lightness = Math.round(50 + 25 * blink);
-
-                ctx.save();
-                ctx.globalCompositeOperation = "lighter";
-                ctx.lineCap = "round";
-                ctx.lineJoin = "round";
-
-                for (let i = 1; i < points.length; i++) {
-                    const prev = points[i - 1];
-                    const curr = points[i];
-
-                    // Verlauf: vorne hell, hinten transparenter und schmaler
-                    const t = i / (points.length - 1);
-                    const alpha = Math.max(0, 0.82 - t * 0.8);
-                    const width = Math.max(1.5, radius * (0.9 - t * 0.72));
-
-                    ctx.strokeStyle = `hsla(${hue.toFixed(1)} 100% ${lightness}% / ${alpha})`;
-                    ctx.lineWidth = width;
-
-                    ctx.beginPath();
-                    ctx.moveTo(prev.x, prev.y);
-                    ctx.lineTo(curr.x, curr.y);
-                    ctx.stroke();
-                }
-
-                ctx.restore();
-            }
-
-            function drawFingertips(landmarks, handIndex, t, seenKeys) {
+            function drawFingertips(landmarks, handIndex, t) {
                 // MediaPipe Hands Landmark Indizes der Fingerspitzen:
                 // Daumen: 4, Zeigefinger: 8, Mittelfinger: 12, Ringfinger: 16, kleiner Finger: 20
                 // Jeweils dazu der DIP/PIP-Nahe Punkt ("unter" der Spitze), um die Fingerbeere grob zu skalieren:
@@ -329,21 +295,6 @@
                     const lightness = 45 + 25 * blink;
 
                     const ledColor = `hsl(${baseHue.toFixed(1)} 100% ${lightness.toFixed(1)}%)`;
-
-                    // Trail verwalten
-                    const key = `${handIndex}-${p.tip}`;
-                    const trail = fingertipTrails.get(key) || { points: [] };
-                    trail.points.push({ x, y });
-                    if (trail.points.length > MAX_TRAIL_POINTS) {
-                        trail.points.splice(0, trail.points.length - MAX_TRAIL_POINTS);
-                    }
-                    trail.hue = baseHue;
-                    trail.blink = blink;
-                    trail.radius = r;
-                    fingertipTrails.set(key, trail);
-                    seenKeys.add(key);
-
-                    drawTrail(trail);
 
                     // Glow
                     ctx.save();
@@ -486,25 +437,10 @@
 
                 const lms = results.multiHandLandmarks || [];
                 const t = performance.now() / 1000;
-                const seenKeys = new Set();
 
                 // Zeichne bis zu 2 Hände -> 10 Punkte
                 for (let hi = 0; hi < lms.length; hi++) {
-                    drawFingertips(lms[hi], hi, t, seenKeys);
-                }
-
-                // Trails zeichnen (auch solche, die gerade nicht erkannt wurden) und langsam kürzen
-                for (const [key, trail] of fingertipTrails.entries()) {
-                    if (!seenKeys.has(key)) {
-                        trail.points.shift(); // langsam ausblenden
-                    }
-
-                    if (!trail.points.length) {
-                        fingertipTrails.delete(key);
-                        continue;
-                    }
-
-                    drawTrail(trail);
+                    drawFingertips(lms[hi], hi, t);
                 }
 
                 setStatus(`tracking: ${lms.length} hand${lms.length === 1 ? "" : "s"}`);
