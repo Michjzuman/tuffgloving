@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Handtracking – 10 Fingerspitzen Punkte</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background: #000;
+            overflow: hidden;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        #wrap {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        video, canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* Kamera ganz sichtbar */
+        video {
+            opacity: 1;
+            filter: none;
+        }
+
+        /* Keine zusaetzliche Dimmung ueber dem Bild */
+        #wrap::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: transparent;
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        /* Canvas muss ueber dem (nun transparenten) Layer liegen */
+        canvas {
+            z-index: 3;
+        }
+
+        /* HUD/Errors noch drueber */
+        #hud, #err {
+            z-index: 4;
+        }
+
+        /* Spiegeln wie Selfie */
+        video, canvas {
+            transform: scaleX(-1);
+        }
+
+        #hud {
+            position: absolute;
+            left: 12px;
+            top: 12px;
+            color: rgba(255, 255, 255, 0.9);
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            padding: 10px 12px;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            user-select: none;
+            max-width: min(520px, calc(100vw - 24px));
+
+            /* Default: HUD versteckt, weil "Lichtershow" */
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 180ms ease;
+        }
+
+        #hud.show {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        #hud h1 {
+            margin: 0 0 6px 0;
+            font-size: 14px;
+            font-weight: 650;
+            letter-spacing: 0.2px;
+        }
+
+        #hud p {
+            margin: 0;
+            font-size: 12px;
+            line-height: 1.35;
+            opacity: 0.9;
+        }
+
+        #hud .row {
+            margin-top: 8px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        #hud button {
+            appearance: none;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: rgba(255, 255, 255, 0.08);
+            color: rgba(255, 255, 255, 0.92);
+            padding: 8px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        #hud button:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+
+        #hud .pill {
+            font-size: 12px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background: rgba(255, 255, 255, 0.06);
+            opacity: 0.95;
+        }
+
+        #err {
+            position: absolute;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.92);
+            text-align: center;
+        }
+
+        #err .box {
+            max-width: 720px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 16px;
+            padding: 18px 16px;
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        #err h2 {
+            margin: 0 0 10px 0;
+            font-size: 16px;
+        }
+
+        #err pre {
+            margin: 0;
+            text-align: left;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 12px;
+            line-height: 1.45;
+            opacity: 0.95;
+        }
+    </style>
+</head>
+<body>
+    <div id="wrap">
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="canvas"></canvas>
+
+        <div id="hud">
+            <h1>Tuff Gloving</h1>
+            <div class="row">
+                <button id="btnToggleCamera" type="button">stop camera</button>
+                <button id="btnSwitch" type="button">switch camera</button>
+                <span class="pill" id="status">Status: init</span>
+            </div>
+        </div>
+
+        <div id="err">
+            <div class="box">
+                <h2>Fehler</h2>
+                <pre id="errText"></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- MediaPipe Hands (Browser) -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script>
+        (async () => {
+            "use strict";
+
+            const video = document.getElementById("video");
+            const canvas = document.getElementById("canvas");
+            const ctx = canvas.getContext("2d", { alpha: true });
+
+            const statusEl = document.getElementById("status");
+            const errEl = document.getElementById("err");
+            const errText = document.getElementById("errText");
+
+            const btnToggleCamera = document.getElementById("btnToggleCamera");
+            const btnSwitch = document.getElementById("btnSwitch");
+            const hud = document.getElementById("hud");
+            let hudVisible = false;
+            let hudHideTimer = null;
+
+            function setHudVisible(v) {
+                hudVisible = v;
+                if (hudVisible) {
+                    hud.classList.add("show");
+                } else {
+                    hud.classList.remove("show");
+                }
+            }
+
+            function flashHud(ms = 1400) {
+                setHudVisible(true);
+                if (hudHideTimer) window.clearTimeout(hudHideTimer);
+                hudHideTimer = window.setTimeout(() => setHudVisible(false), ms);
+            }
+
+            let stream = null;
+            let running = true;
+            let facingMode = "user"; // "user" (front) oder "environment" (back)
+            let cameraUtil = null;
+
+            function setStatus(text) {
+                statusEl.textContent = `Status: ${text}`;
+            }
+
+            function showError(title, details) {
+                errEl.style.display = "flex";
+                errText.textContent = `${title}\n\n${details || ""}`;
+                setStatus("error");
+            }
+
+            function resizeCanvasToVideo() {
+                const w = video.videoWidth || 1280;
+                const h = video.videoHeight || 720;
+
+                if (canvas.width !== w) canvas.width = w;
+                if (canvas.height !== h) canvas.height = h;
+            }
+
+            function drawFingertips(landmarks, handIndex, t) {
+                // MediaPipe Hands Landmark Indizes der Fingerspitzen:
+                // Daumen: 4, Zeigefinger: 8, Mittelfinger: 12, Ringfinger: 16, kleiner Finger: 20
+                // Jeweils dazu der DIP/PIP-Nahe Punkt ("unter" der Spitze), um die Fingerbeere grob zu skalieren:
+                // Daumen-IP: 3, Zeigefinger-DIP: 7, Mittelfinger-DIP: 11, Ringfinger-DIP: 15, Kleiner-DIP: 19
+                const tipPairs = [
+                    { tip: 4, near: 3 },
+                    { tip: 8, near: 7 },
+                    { tip: 12, near: 11 },
+                    { tip: 16, near: 15 },
+                    { tip: 20, near: 19 }
+                ];
+
+                const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+                // Falls Tracking mal spinnt: Grenzen fuers Radius
+                const minR = Math.max(3, Math.round(Math.min(canvas.width, canvas.height) * 0.006));
+                const maxR = Math.max(minR + 2, Math.round(Math.min(canvas.width, canvas.height) * 0.055));
+
+                for (let i = 0; i < tipPairs.length; i++) {
+                    const p = tipPairs[i];
+                    const tip = landmarks[p.tip];
+                    const near = landmarks[p.near];
+
+                    const x = tip.x * canvas.width;
+                    const y = tip.y * canvas.height;
+
+                    // 2D-Laenge des letzten Fingerglieds (Tip <-> near) in Pixel
+                    const dx = (tip.x - near.x) * canvas.width;
+                    const dy = (tip.y - near.y) * canvas.height;
+                    const segLenPx = Math.hypot(dx, dy);
+
+                    // Z ist (relativ) Tiefe: typischerweise ist naeher zur Kamera "mehr negativ".
+                    // Wir nutzen das als Perspektiv-Boost (nur leicht, sonst wird's wild).
+                    const z = (typeof tip.z === "number") ? tip.z : 0;
+                    const zBoost = clamp(1 + (-z * 1.6), 0.75, 2.2);
+
+                    // Fingerbeere ≈ etwas groesser als halbe Laenge des letzten Segments.
+                    let r = (segLenPx * 0.55) * zBoost;
+                    r = clamp(r, minR, maxR);
+
+                    // LED-Lichtershow: Hue cycle + Blink pro Finger
+                    const baseHue = (t * 90 + handIndex * 170 + i * 72) % 360;
+                    const blink = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * 7.2 + handIndex * 1.7 + i * 2.1));
+                    const lightness = 45 + 25 * blink;
+
+                    const ledColor = `hsl(${baseHue.toFixed(1)} 100% ${lightness.toFixed(1)}%)`;
+
+                    // Glow
+                    ctx.save();
+                    ctx.globalCompositeOperation = "lighter";
+                    ctx.shadowColor = ledColor;
+                    ctx.shadowBlur = r * (3.2 + 2.2 * blink);
+
+                    // Aussen-LED
+                    ctx.fillStyle = ledColor;
+                    ctx.beginPath();
+                    ctx.arc(x, y, r, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Innerer, sehr heller Kern
+                    ctx.shadowBlur = r * (1.2 + 0.8 * blink);
+                    ctx.fillStyle = `hsla(${baseHue.toFixed(1)} 100% 92% / ${0.75 + 0.25 * blink})`;
+                    ctx.beginPath();
+                    ctx.arc(x, y, Math.max(1, r * 0.42), 0, Math.PI * 2);
+                    ctx.fill();
+
+                    ctx.restore();
+                }
+            }
+
+            function clearOverlay() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+
+            async function startUserMedia() {
+                setStatus("camera start...");
+
+                if (!navigator.mediaDevices?.getUserMedia) {
+                    throw new Error("Dein Browser unterstuetzt getUserMedia nicht.");
+                }
+
+                // Stop alte Streams
+                if (stream) {
+                    for (const t of stream.getTracks()) t.stop();
+                    stream = null;
+                }
+
+                // Manche Safari-Versionen sind picky: facingMode kann failen.
+                // Daher: erst mit facingMode probieren, sonst fallback.
+                const constraintsPrimary = {
+                    audio: false,
+                    video: {
+                        facingMode: { ideal: facingMode },
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    }
+                };
+
+                const constraintsFallback = {
+                    audio: false,
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    }
+                };
+
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia(constraintsPrimary);
+                } catch (e) {
+                    stream = await navigator.mediaDevices.getUserMedia(constraintsFallback);
+                }
+
+                video.srcObject = stream;
+
+                await new Promise((resolve) => {
+                    video.onloadedmetadata = () => resolve();
+                });
+
+                await video.play();
+
+                resizeCanvasToVideo();
+                setStatus("kamera on");
+            }
+
+            function stopUserMedia() {
+                if (stream) {
+                    for (const t of stream.getTracks()) t.stop();
+                    stream = null;
+                }
+                video.srcObject = null;
+                clearOverlay();
+                setStatus("kamera off");
+            }
+
+            function toggleCamera() {
+                running = !running;
+                if (running) {
+                    btnToggleCamera.textContent = "Kamera stoppen";
+                    return startPipeline();
+                } else {
+                    btnToggleCamera.textContent = "Kamera starten";
+                    stopPipeline();
+                }
+            }
+
+            function switchCamera() {
+                facingMode = (facingMode === "user") ? "environment" : "user";
+                if (running) {
+                    return startPipeline();
+                }
+            }
+
+            btnToggleCamera.addEventListener("click", () => {
+                toggleCamera().catch((e) => showError("Toggle fehlgeschlagen", String(e?.stack || e)));
+            });
+
+            btnSwitch.addEventListener("click", () => {
+                switchCamera().catch((e) => showError("Wechsel fehlgeschlagen", String(e?.stack || e)));
+            });
+
+            // MediaPipe Hands Setup
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.6,
+                minTrackingConfidence: 0.6
+            });
+
+            hands.onResults((results) => {
+                // Falls Video gerade keine Frames liefert
+                if (!running) return;
+
+                resizeCanvasToVideo();
+
+                // Lichtershow: Nachleuchten OHNE das Video schwarz zu uebermalen.
+                // Trick: Wir "faden" nur die EXISTIERENDEN Canvas-Pixel (Alpha runter), statt schwarz zu zeichnen.
+                ctx.save();
+                ctx.globalCompositeOperation = "destination-out";
+                ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.restore();
+
+                const lms = results.multiHandLandmarks || [];
+                const t = performance.now() / 1000;
+
+                // Zeichne bis zu 2 Hände -> 10 Punkte
+                for (let hi = 0; hi < lms.length; hi++) {
+                    drawFingertips(lms[hi], hi, t);
+                }
+
+                setStatus(`tracking: ${lms.length} hand${lms.length === 1 ? "" : "s"}`);
+            });
+
+            async function startPipeline() {
+                stopPipeline();
+
+                await startUserMedia();
+
+                // MediaPipe camera_utils helper
+                cameraUtil = new Camera(video, {
+                    onFrame: async () => {
+                        if (!running) return;
+                        await hands.send({ image: video });
+                    },
+                    width: video.videoWidth || 1280,
+                    height: video.videoHeight || 720
+                });
+
+                cameraUtil.start();
+                setStatus("tracking on");
+            }
+
+            function stopPipeline() {
+                if (cameraUtil) {
+                    try {
+                        cameraUtil.stop();
+                    } catch (_) {
+                        // ignore
+                    }
+                    cameraUtil = null;
+                }
+                stopUserMedia();
+            }
+
+            // HUD: kurz zeigen, dann verstecken (Taste: H)
+            flashHud(2200);
+            window.addEventListener("keydown", (e) => {
+                if (e.key?.toLowerCase?.() === "h") {
+                    setHudVisible(!hudVisible);
+                }
+            });
+            window.addEventListener("mousemove", () => {
+                // bei Bewegung kurz einblenden
+                flashHud(1100);
+            }, { passive: true });
+
+            // Auto-Start
+            try {
+                await startPipeline();
+            } catch (e) {
+                showError(
+                    "Kamera/Tracking konnte nicht gestartet werden.",
+                    String(e?.stack || e)
+                );
+            }
+
+            // Resize: Canvas an Video-Groesse anpassen (bei Rotation etc.)
+            window.addEventListener("resize", () => {
+                resizeCanvasToVideo();
+            });
+        })();
+    </script>
+</body>
+</html>
